@@ -1,0 +1,151 @@
+---
+- name: Install Duplicati and configure Apache reverse proxy
+  hosts: all
+  become: true
+  vars:
+    apache_modules:
+      - proxy
+      - proxy_http
+      - headers
+      - proxy_wstunnel
+  tasks:
+    - name: Update apt cache
+      apt:
+         update_cache: yes
+         
+    - name: Create duplicati group
+      group:
+        name: duplicati
+        state: present
+
+    - name: Create duplicati user
+      user:
+        name: duplicati
+        group: duplicati
+        shell: /bin/bash
+        home: /home/duplicati
+        createhome: yes
+
+
+    - name: Download Duplicati package
+      get_url:
+        url: https://updates.duplicati.com/beta/duplicati_2.0.6.3-1_all.deb
+        dest: /tmp/duplicati_2.0.6.3-1_all.deb
+
+    - name: Install Duplicati package
+      apt:
+        deb: /tmp/duplicati_2.0.6.3-1_all.deb
+        update_cache: yes
+    
+
+    - name: Copy duplicati service file
+      copy:
+        content: |
+          [Unit]
+          Description=Duplicati web-server
+          After=network.target
+
+          [Service]
+          User=duplicati
+          Group=duplicati
+          ExecStart=/usr/bin/duplicati-server --webservice-interface=any
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/duplicati.service
+        mode: 0644
+        owner: root
+        group: root
+      notify:
+        - Reload systemd
+
+    - name: Set DAEMON_OPTS in duplicati config
+      lineinfile:
+        path: /etc/default/duplicati
+        line: 'DAEMON_OPTS="--webservice-interface=any --webservice-port=8200 --portable-mode"'
+        state: present
+        create: yes
+
+
+    - name: Enable duplicati service on boot
+      systemd:
+        name: duplicati.service
+        enabled: yes
+      become_user: root
+
+    - name: Reload systemd configuration
+      systemd:
+        daemon_reload: yes
+      become_user: root
+
+    - name: Start duplicati service
+      systemd:
+        name: duplicati.service
+        state: started
+      become_user: root
+
+    - name: Check duplicati service status
+      systemd:
+        name: duplicati.service
+        state: started
+      register: duplicati_service_status
+      become_user: root
+
+    - name: Print duplicati service status
+      debug:
+        var: duplicati_service_status
+
+    - name: Restart duplicati service
+      service:
+        name: duplicati.service
+        state: restarted
+
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+   
+    - name: Install Apache2 package
+      apt:
+        name: apache2
+        state: present
+
+    - name: Start Apache2 service
+      service:
+            name: apache2
+            state: started
+            enabled: yes
+
+    - name: Enable Apache modules
+      shell: "a2enmod {{ item }}"
+      with_items: "{{ apache_modules }}"
+
+    - name: Create duplicati.conf file
+      copy:
+        dest: /etc/apache2/sites-available/duplicati.conf
+        content: |
+          <VirtualHost *:80>
+             ServerName duplicati.example.com
+             ErrorDocument 404 /404.html
+
+             ProxyPass / http://127.0.0.1:8200/
+             ProxyPassReverse / http://127.0.0.1:8200/
+
+             ErrorLog ${APACHE_LOG_DIR}/duplicati_error.log
+             CustomLog ${APACHE_LOG_DIR}/duplicati_access.log combined
+          </VirtualHost>
+
+    - name: Enable duplicati site
+      shell: "a2ensite duplicati.conf"
+    - name: Start duplicati service
+      systemd:
+          name: duplicati.service
+          state: started
+          enabled: yes
+
+    - name: Restart Apache
+      systemd:
+        name: apache2
+        state: restarted
